@@ -106,6 +106,9 @@ _tasks() {
                     status="running" icon="●" color="$GREEN" sort_order=2
                 elif echo "$lastline" | grep -qE '\[[Yy]/[Nn]\]|Enter to select .* Esc to cancel|Esc to cancel .* ctrl\+e to explain|ctrl-g to edit in VS Code|\(esc\)$'; then
                     status="waiting" icon="◎" color="$YELLOW" sort_order=0
+                elif echo "$tail" | grep -qE '❯ [0-9]+\.|Ready to submit'; then
+                    # Claude numbered menu selection
+                    status="waiting" icon="◎" color="$YELLOW" sort_order=0
                 else
                     status="idle" icon="○" color="$YELLOW" sort_order=1
                 fi
@@ -227,6 +230,8 @@ for s in $(tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "^'"${PREF
                 if printf "%s" "$last" | grep -qE "esc to interrupt|ctrl\+c to interrupt"; then
                     st="running"
                 elif printf "%s" "$last" | grep -qE "\[[Yy]/[Nn]\]|Enter to select|Esc to cancel|ctrl-g|\(esc\)$"; then
+                    st="waiting"
+                elif printf "%s" "$tail" | grep -qE "❯ [0-9]+\.|Ready to submit"; then
                     st="waiting"
                 else
                     st="idle"
