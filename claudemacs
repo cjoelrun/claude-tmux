@@ -11,6 +11,7 @@ RESET=$'\033[0m'
 
 ARCHIVE_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/archived"
 PROJECTS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/projects"
+REMOTE_HOSTS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/remote-hosts"
 
 # Prefix for remote SSH commands — non-interactive SSH doesn't load the login
 # shell profile, so tmux/claude may not be on PATH.
@@ -44,7 +45,7 @@ _unarchive() {
 _sessions() {
     tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${PREFIX}/" | while IFS= read -r s; do
         tmux show-environment -t "=$s" CLAUDEMACS_PROXY 2>/dev/null | grep -q '=' || echo "$s"
-    done
+    done || true
 }
 
 _projects() {
@@ -57,7 +58,7 @@ _projects() {
         while IFS= read -r s; do
             local name="${s#${PREFIX}/}"
             local path
-            path=$(tmux display-message -t "=$s" -p '#{session_path}')
+            path=$(tmux display-message -t "$s" -p '#{session_path}')
             printf '%s\t%s\n' "$name" "$path"
             seen+=("$name")
         done <<< "$sessions"
@@ -104,7 +105,7 @@ _tasks() {
                 # claude code session (may have subprocesses running)
                 if echo "$lastline" | grep -qE 'esc to interrupt|ctrl\+c to interrupt'; then
                     status="running" icon="●" color="$GREEN" sort_order=2
-                elif echo "$lastline" | grep -qE '\[[Yy]/[Nn]\]|Enter to select .* Esc to cancel|Esc to cancel .* ctrl\+e to explain|ctrl-g to edit in VS Code|\(esc\)$'; then
+                elif echo "$lastline" | grep -qE '\[[Yy]/[Nn]\]|Enter to select .* Esc to cancel|Esc to cancel|ctrl-g to edit in VS Code|\(esc\)$'; then
                     status="waiting" icon="◎" color="$YELLOW" sort_order=0
                 elif echo "$tail" | grep -qE '❯ [0-9]+\.|Ready to submit'; then
                     # Claude numbered menu selection
@@ -144,8 +145,22 @@ _remote_peers() {
     command -v tailscale >/dev/null 2>&1 || return 0
     local json
     json=$(tailscale status --json 2>/dev/null) || return 0
+
+    # Read whitelist if it exists
+    local whitelist_arg=""
+    if [ -f "$REMOTE_HOSTS_FILE" ]; then
+        whitelist_arg="$REMOTE_HOSTS_FILE"
+    fi
+
     printf '%s' "$json" | python3 -c '
-import sys, json
+import sys, json, os
+
+whitelist_file = sys.argv[1] if len(sys.argv) > 1 else None
+whitelist = None
+if whitelist_file and os.path.exists(whitelist_file):
+    with open(whitelist_file) as f:
+        whitelist = set(line.strip() for line in f if line.strip() and not line.startswith("#"))
+
 data = json.load(sys.stdin)
 peers = data.get("Peer", {})
 for key, peer in peers.items():
@@ -158,8 +173,13 @@ for key, peer in peers.items():
     if not ips:
         continue
     hostname = peer.get("HostName", peer.get("DNSName", "unknown")).split(".")[0]
+
+    # Filter by whitelist if present
+    if whitelist and hostname not in whitelist:
+        continue
+
     print(f"{ips[0]}\t{hostname}")
-' 2>/dev/null || true
+' "$whitelist_arg" 2>/dev/null || true
 }
 
 _host_picker() {
@@ -473,6 +493,40 @@ _kill_task() {
     fi
 }
 
+_pick_command() {
+    local commands=(
+        "claude"
+        "sh"
+        "emacs -nw"
+        "nvim"
+        "btop"
+        "htop"
+        "lazygit"
+        "tig"
+    )
+
+    local result
+    result=$(printf '%s\n' "${commands[@]}" | fzf \
+        --prompt 'Command: ' \
+        --height 40% \
+        --layout=reverse \
+        --header 'Enter: select · Ctrl-e: use custom command · Esc: shell' \
+        --query="claude" \
+        --print-query \
+        --bind 'ctrl-e:replace-query+print-query+accept')
+
+    # Parse fzf output: last non-empty line is the selection or custom command
+    local cmd
+    cmd=$(echo "$result" | grep -v '^$' | tail -1)
+
+    # Return empty string for explicit "sh" choice, otherwise return the command
+    if [ "$cmd" = "sh" ]; then
+        echo ""
+    else
+        echo "$cmd"
+    fi
+}
+
 _create_project() {
     local name="$1" path="$2"
     name=$(echo "$name" | tr -cd 'a-zA-Z0-9._-')
@@ -485,7 +539,7 @@ _create_project() {
 }
 
 _create_task() {
-    local project="$1" name="$2"
+    local project="$1" name="$2" cmd="${3:-claude}"
     local session="${PREFIX}/${project}"
     local proj_path
     # Recreate session from persisted project if needed
@@ -497,7 +551,7 @@ _create_task() {
         [ -d "$proj_path" ] || die "project directory gone: $proj_path"
         tmux new-session -d -s "$session" -c "$proj_path" -n "$name"
         local target="${session}:0"
-        tmux send-keys -t "$target" "claude" Enter
+        [ -n "$cmd" ] && tmux send-keys -t "$target" "$cmd" Enter
         echo "$target"
         return
     fi
@@ -505,7 +559,7 @@ _create_task() {
     local idx
     idx=$(tmux new-window -t "$session" -n "$name" -c "$proj_path" -P -F '#{window_index}')
     local target="${session}:${idx}"
-    tmux send-keys -t "$target" "claude" Enter
+    [ -n "$cmd" ] && tmux send-keys -t "$target" "$cmd" Enter
     echo "$target"
 }
 
@@ -520,11 +574,13 @@ _create_project_remote() {
 }
 
 _create_task_remote() {
-    local ip="$1" project="$2" task_name="$3"
+    local ip="$1" project="$2" task_name="$3" cmd="${4:-claude}"
     local session="${PREFIX}/${project}"
     local idx
+    local send_keys_cmd=""
+    [ -n "$cmd" ] && send_keys_cmd="&& tmux send-keys -t '\${session}:'\"\$idx\" '${cmd}' Enter"
     idx=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$ip" \
-        "${_RENV} proj_path=\$(tmux display-message -t '=${session}' -p '#{session_path}') && idx=\$(tmux new-window -t '${session}' -n '${task_name}' -c \"\$proj_path\" -P -F '#{window_index}') && tmux send-keys -t '${session}:'\"\$idx\" 'claude' Enter && echo \"\$idx\"") \
+        "${_RENV} proj_path=\$(tmux display-message -t '=${session}' -p '#{session_path}') && idx=\$(tmux new-window -t '${session}' -n '${task_name}' -c \"\$proj_path\" -P -F '#{window_index}') ${send_keys_cmd} && echo \"\$idx\"") \
         || die "failed to create remote task on $ip"
     idx=$(echo "$idx" | tr -d '[:space:]')
     echo "remote:${ip}:${session}:${idx}"
@@ -592,10 +648,12 @@ _new_task_flow_first() {
     local task_name
     read -rp "Task name: " task_name
     [ -z "$task_name" ] && return
+    local cmd
+    cmd=$(_pick_command)
     local session="${PREFIX}/${project}"
     local target="${session}:0"
     tmux rename-window -t "$target" "$task_name"
-    tmux send-keys -t "$target" "claude" Enter
+    [ -n "$cmd" ] && tmux send-keys -t "$target" "$cmd" Enter
     _switch "$target"
 }
 
@@ -604,9 +662,13 @@ _new_task_flow_first_remote() {
     local task_name
     read -rp "Task name: " task_name
     [ -z "$task_name" ] && return
+    local cmd
+    cmd=$(_pick_command)
     local session="${PREFIX}/${project}"
+    local send_keys_cmd=""
+    [ -n "$cmd" ] && send_keys_cmd="&& tmux send-keys -t '${session}:0' '${cmd}' Enter"
     ssh -o ConnectTimeout=5 -o BatchMode=yes "$ip" \
-        "${_RENV} tmux rename-window -t '${session}:0' '${task_name}' && tmux send-keys -t '${session}:0' 'claude' Enter" \
+        "${_RENV} tmux rename-window -t '${session}:0' '${task_name}' ${send_keys_cmd}" \
         || die "failed to set up first task on $ip"
     local target="remote:${ip}:${session}:0"
     _switch "$target" "$task_name"
@@ -634,32 +696,24 @@ _new_task_flow() {
         projects=$(_all_projects)
     fi
 
-    local count
-    count=$(echo "$projects" | wc -l | tr -d ' ')
-
     local selected
-    if [ "$count" -eq 1 ]; then
-        selected="$projects"
-        local display_name
-        display_name=$(echo "$selected" | cut -f2)
-        printf 'Project: %s\n\n' "$display_name"
-    else
-        printf '%sSelect project%s\n' "$BOLD" "$RESET"
-        # Format: origin\tproject\tpath
-        # Display project name with dimmed [hostname] for remote entries
-        selected=$(echo "$projects" | awk -F'\t' '{
-            origin=$1; proj=$2; path=$3
-            if (origin == "local") {
-                printf "%s\t%s\t%s\t%s\n", origin, proj, path, proj
-            } else {
-                # origin is remote:<ip>:<hostname>
-                split(origin, parts, ":")
-                hostname = parts[3]
-                printf "%s\t%s\t%s\t%s \033[2m[%s]\033[0m\n", origin, proj, path, proj, hostname
-            }
-        }' | fzf --ansi --delimiter '\t' --with-nth 4 \
-            --preview 'echo {3}' --preview-window 'up:1:wrap') || return
-    fi
+    printf '%sSelect project%s\n' "$BOLD" "$RESET"
+    # Format: origin\tproject\tpath
+    # Display project name with dimmed [hostname] for remote entries
+    local new_entry
+    new_entry=$(printf 'new\t\t\t%s+ New project%s' "$GREEN" "$RESET")
+    selected=$({ echo "$new_entry"; echo "$projects" | awk -F'\t' '{
+        origin=$1; proj=$2; path=$3
+        if (origin == "local") {
+            printf "%s\t%s\t%s\t%s\n", origin, proj, path, proj
+        } else {
+            # origin is remote:<ip>:<hostname>
+            split(origin, parts, ":")
+            hostname = parts[3]
+            printf "%s\t%s\t%s\t%s \033[2m[%s]\033[0m\n", origin, proj, path, proj, hostname
+        }
+    }'; } | fzf --ansi --delimiter '\t' --with-nth 4 \
+        --preview 'echo {3}' --preview-window 'up:1:wrap') || return
 
     [ -z "$selected" ] && return
 
@@ -667,16 +721,54 @@ _new_task_flow() {
     origin=$(echo "$selected" | cut -f1)
     proj_name=$(echo "$selected" | cut -f2)
 
+    # Handle inline project creation
+    if [ "$origin" = "new" ]; then
+        local host_line
+        host_line=$(_host_picker) || return
+        [ -z "$host_line" ] && return 1
+
+        local host_type
+        host_type=$(echo "$host_line" | cut -f1)
+
+        local new_name new_path
+        read -rp "Project name: " new_name
+        [ -z "$new_name" ] && return 1
+
+        if [ "$host_type" = "local" ]; then
+            new_path=$(_path_picker_local)
+            [ -z "$new_path" ] && return 1
+            new_path="${new_path/#\~/$HOME}"
+            _create_project "$new_name" "$new_path"
+            printf '\nCreated project: %s → %s\n\n' "$new_name" "$new_path"
+            origin="local"
+            proj_name="$new_name"
+        else
+            local host_ip="$host_type"
+            local hostname
+            hostname=$(echo "$host_line" | cut -f2)
+            new_path=$(_path_picker_remote "$host_ip")
+            [ -z "$new_path" ] && return 1
+            _create_project_remote "$host_ip" "$new_name" "$new_path"
+            printf '\nCreated remote project: %s → %s on %s\n\n' "$new_name" "$new_path" "$hostname"
+            origin="remote:${host_ip}:${hostname}"
+            proj_name="$new_name"
+        fi
+    fi
+
+    # Pick command to run
+    local cmd
+    cmd=$(_pick_command)
+
     if [ "$origin" = "local" ]; then
         local target
-        target=$(_create_task "$proj_name" "$task_name")
+        target=$(_create_task "$proj_name" "$task_name" "$cmd")
         _switch "$target"
     else
         # origin is remote:<ip>:<hostname>
         local ip
         ip=$(echo "$origin" | cut -d: -f2)
         local target
-        target=$(_create_task_remote "$ip" "$proj_name" "$task_name")
+        target=$(_create_task_remote "$ip" "$proj_name" "$task_name" "$cmd")
         _switch "$target" "$task_name"
     fi
 }
