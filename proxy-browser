@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# proxy-browser — launch a browser that resolves DNS through a remote Tailscale node
+#
+# Usage:
+#   proxy-browser                      # uses defaults from config
+#   proxy-browser --host mynode        # override remote host
+#   proxy-browser --port 1080          # override SOCKS port
+#   proxy-browser --browser firefox    # use firefox instead of chrome
+#
+# Config file: ~/.config/proxy-browser/config
+#   PROXY_HOST=camerons-macbook-pro-2
+#   PROXY_PORT=1080
+#   PROXY_BROWSER=chrome
+#   PROXY_SSH_USER=                    # blank = current user
+#   PROXY_CHROME_FLAGS=                # extra chrome flags
+#   PROXY_PROFILE_DIR=                 # custom profile directory
+#   PROXY_HTTP_PORT=8118               # local HTTP CONNECT proxy port
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/proxy-browser"
+CONFIG_FILE="$CONFIG_DIR/config"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/proxy-browser"
+PROFILE_DIR="$DATA_DIR/profile"
+PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/proxy-browser-ssh.pid"
+HTTP_PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/proxy-browser-http.pid"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# --- Defaults (all overridable via config or flags) ---
+PROXY_HOST=""
+PROXY_PORT="1080"
+PROXY_HTTP_PORT="8118"
+PROXY_BROWSER="chrome"
+PROXY_SSH_USER=""
+PROXY_CHROME_FLAGS=""
+PROXY_PROFILE_DIR=""
+BROWSER_ARGS=()
+
+# --- Load config ---
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+fi
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --host)     PROXY_HOST="$2"; shift 2 ;;
+        --port)     PROXY_PORT="$2"; shift 2 ;;
+        --http-port) PROXY_HTTP_PORT="$2"; shift 2 ;;
+        --browser)  PROXY_BROWSER="$2"; shift 2 ;;
+        --user)     PROXY_SSH_USER="$2"; shift 2 ;;
+        --profile)  PROXY_PROFILE_DIR="$2"; shift 2 ;;
+        --setup)    _setup; exit 0 ;;
+        --help|-h)
+            cat <<'EOF'
+proxy-browser — launch a browser that resolves DNS through a remote Tailscale node
+
+Usage:
+  proxy-browser [options]
+
+Options:
+  --host HOST       Remote Tailscale hostname or IP
+  --port PORT       SOCKS proxy port (default: 1080)
+  --http-port PORT  Local HTTP proxy port (default: 8118)
+  --browser NAME    Browser: chrome, firefox, edge (default: chrome)
+  --user USER       SSH username (default: current user)
+  --profile DIR     Browser profile directory
+  --setup           Create default config file
+  -h, --help        Show this help
+
+Config: ~/.config/proxy-browser/config
+
+Example config:
+  PROXY_HOST=camerons-macbook-pro-2
+  PROXY_PORT=1080
+  PROXY_BROWSER=chrome
+EOF
+            exit 0
+            ;;
+        *) BROWSER_ARGS+=("$1"); shift ;;
+    esac
+done
+
+# --- Validate ---
+[ -n "$PROXY_HOST" ] || die "no host configured. Run: proxy-browser --setup"
+
+PROFILE_DIR="${PROXY_PROFILE_DIR:-$PROFILE_DIR}"
+SSH_TARGET="${PROXY_SSH_USER:+$PROXY_SSH_USER@}$PROXY_HOST"
+
+# --- Resolve browser path ---
+_browser_path() {
+    case "$PROXY_BROWSER" in
+        chrome|google-chrome)
+            if [ -d "/Applications/Google Chrome.app" ]; then
+                echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            elif command -v google-chrome-stable &>/dev/null; then
+                echo "google-chrome-stable"
+            elif command -v google-chrome &>/dev/null; then
+                echo "google-chrome"
+            else
+                die "Chrome not found"
+            fi
+            ;;
+        firefox)
+            if [ -d "/Applications/Firefox.app" ]; then
+                echo "/Applications/Firefox.app/Contents/MacOS/firefox"
+            elif command -v firefox &>/dev/null; then
+                echo "firefox"
+            else
+                die "Firefox not found"
+            fi
+            ;;
+        edge)
+            if [ -d "/Applications/Microsoft Edge.app" ]; then
+                echo "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+            elif command -v microsoft-edge &>/dev/null; then
+                echo "microsoft-edge"
+            else
+                die "Edge not found"
+            fi
+            ;;
+        *) die "unsupported browser: $PROXY_BROWSER" ;;
+    esac
+}
+
+# --- SSH tunnel management ---
+_tunnel_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+_start_tunnel() {
+    if _tunnel_running; then
+        echo "SSH tunnel already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+
+    echo "Starting SSH SOCKS proxy to $SSH_TARGET on port $PROXY_PORT..."
+    ssh -D "$PROXY_PORT" -N -f \
+        -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o ConnectTimeout=5 \
+        "$SSH_TARGET"
+
+    # Find the ssh process we just started
+    local pid
+    pid=$(pgrep -f "ssh -D $PROXY_PORT.*$SSH_TARGET" | head -1)
+    [ -n "$pid" ] || die "failed to start SSH tunnel"
+    echo "$pid" > "$PIDFILE"
+    echo "SSH tunnel started (pid $pid)"
+}
+
+_stop_tunnel() {
+    if [ -f "$PIDFILE" ]; then
+        local pid
+        pid=$(cat "$PIDFILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            echo "SSH tunnel stopped (pid $pid)"
+        fi
+        rm -f "$PIDFILE"
+    fi
+}
+
+# --- HTTP CONNECT proxy (bridges Chrome → SOCKS, bypasses .localhost interception) ---
+_start_http_proxy() {
+    if [ -f "$HTTP_PIDFILE" ] && kill -0 "$(cat "$HTTP_PIDFILE")" 2>/dev/null; then
+        echo "HTTP proxy already running (pid $(cat "$HTTP_PIDFILE"))"
+        return 0
+    fi
+
+    local self_dir
+    self_dir="$(cd "$(dirname "$0")" && pwd)"
+
+    echo "Starting HTTP CONNECT proxy on port $PROXY_HTTP_PORT..."
+    python3 "$self_dir/connect-proxy.py" "$PROXY_PORT" "$PROXY_HTTP_PORT" &
+    local pid=$!
+    echo "$pid" > "$HTTP_PIDFILE"
+    sleep 0.5
+    if ! kill -0 "$pid" 2>/dev/null; then
+        die "failed to start HTTP proxy"
+    fi
+    echo "HTTP proxy started (pid $pid)"
+}
+
+_stop_http_proxy() {
+    if [ -f "$HTTP_PIDFILE" ]; then
+        local pid
+        pid=$(cat "$HTTP_PIDFILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            echo "HTTP proxy stopped (pid $pid)"
+        fi
+        rm -f "$HTTP_PIDFILE"
+    fi
+}
+
+# --- Launch browser ---
+_launch_browser() {
+    local browser_bin
+    browser_bin=$(_browser_path)
+
+    mkdir -p "$PROFILE_DIR"
+
+    case "$PROXY_BROWSER" in
+        chrome|google-chrome|edge)
+            # shellcheck disable=SC2086
+            "$browser_bin" \
+                --proxy-server="http://localhost:$PROXY_HTTP_PORT" \
+                --proxy-bypass-list="localhost;127.0.0.1;[::1]" \
+                --user-data-dir="$PROFILE_DIR" \
+                --no-first-run \
+                --no-default-browser-check \
+                --disable-default-apps \
+                --disable-sync \
+                --disable-background-networking \
+                --metrics-recording-only \
+                --test-type \
+                $PROXY_CHROME_FLAGS \
+                "${BROWSER_ARGS[@]}"
+            ;;
+        firefox)
+            local prefs_file="$PROFILE_DIR/user.js"
+            mkdir -p "$PROFILE_DIR"
+            cat > "$prefs_file" <<PREFS
+user_pref("network.proxy.type", 1);
+user_pref("network.proxy.http", "127.0.0.1");
+user_pref("network.proxy.http_port", $PROXY_HTTP_PORT);
+user_pref("network.proxy.ssl", "127.0.0.1");
+user_pref("network.proxy.ssl_port", $PROXY_HTTP_PORT);
+user_pref("network.proxy.no_proxies_on", "");
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.shell.didSkipDefaultBrowserCheckOnFirstRun", true);
+user_pref("browser.shell.skipDefaultBrowserCheckOnFirstRun", true);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_welcome_url", "about:blank");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.policy.dataSubmissionPolicyAcceptedVersion", 2);
+user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("browser.rights.3.shown", true);
+user_pref("browser.laterrun.enabled", false);
+user_pref("browser.startup.homepage", "about:blank");
+user_pref("browser.newtabpage.enabled", false);
+user_pref("browser.newtabpage.activity-stream.showSponsored", false);
+user_pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);
+user_pref("browser.newtabpage.activity-stream.feeds.topsites", false);
+user_pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
+user_pref("browser.newtabpage.activity-stream.feeds.section.highlights", false);
+user_pref("browser.messaging-system.whatsNewPanel.enabled", false);
+user_pref("browser.uitour.enabled", false);
+user_pref("browser.defaultbrowser.notificationbar", false);
+user_pref("security.enterprise_roots.enabled", true);
+user_pref("network.proxy.allow_hijacking_localhost", true);
+user_pref("network.dns.localDomains", "");
+user_pref("security.tls.ech.grease_enabled", false);
+user_pref("network.dns.echconfig.enabled", false);
+user_pref("network.dns.http3_echconfig.enabled", false);
+PREFS
+            "$browser_bin" --profile "$PROFILE_DIR" "${BROWSER_ARGS[@]}"
+            ;;
+    esac
+}
+
+# --- Setup ---
+_setup() {
+    mkdir -p "$CONFIG_DIR"
+    if [ -f "$CONFIG_FILE" ]; then
+        echo "Config already exists: $CONFIG_FILE"
+        cat "$CONFIG_FILE"
+        return 0
+    fi
+    cat > "$CONFIG_FILE" <<'EOF'
+# proxy-browser configuration
+# Remote Tailscale hostname or IP (required)
+PROXY_HOST=
+
+# SOCKS proxy port
+PROXY_PORT=1080
+
+# Local HTTP CONNECT proxy port
+PROXY_HTTP_PORT=8118
+
+# Browser: chrome, firefox, edge
+PROXY_BROWSER=chrome
+
+# SSH username (blank = current user)
+PROXY_SSH_USER=
+
+# Extra Chrome/Edge flags (space-separated)
+PROXY_CHROME_FLAGS=
+
+# Custom browser profile directory (blank = default)
+PROXY_PROFILE_DIR=
+EOF
+    echo "Config created: $CONFIG_FILE"
+    echo "Edit it to set PROXY_HOST, then run proxy-browser"
+}
+
+# --- Cleanup ---
+_cleanup() {
+    _stop_http_proxy
+    _stop_tunnel
+}
+
+# --- Main ---
+trap _cleanup EXIT
+_start_tunnel
+_start_http_proxy
+_launch_browser

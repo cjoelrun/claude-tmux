@@ -39,6 +39,157 @@ _unarchive() {
     mv "$ARCHIVE_FILE.tmp" "$ARCHIVE_FILE"
 }
 
+# --- Status line ---
+
+REMOTE_STATUS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/remote-status"
+REMOTE_STATUS_LOCK="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/remote-status.lock"
+REMOTE_STATUS_TTL=30
+
+_status_line_fetch_remote() {
+    # Lock to prevent concurrent fetches
+    if ! mkdir "$REMOTE_STATUS_LOCK" 2>/dev/null; then
+        return 0
+    fi
+    trap "rmdir '$REMOTE_STATUS_LOCK' 2>/dev/null" EXIT
+
+    local peers
+    peers=$(_remote_peers)
+    if [ -z "$peers" ]; then
+        printf 'waiting=0\nrunning=0\nidle=0\n' > "$REMOTE_STATUS_FILE"
+        return 0
+    fi
+
+    # SSH into each host and count statuses
+    local tmpout
+    tmpout=$(mktemp "${TMPDIR:-/tmp}/claudemacs-rstatus.XXXXXX")
+    local pids=()
+    while IFS=$'\t' read -r ip hostname; do
+        ssh -o ConnectTimeout=2 -o BatchMode=yes "$ip" \
+            "${_RENV}"'
+w=0; r=0; i=0
+for s in $(tmux list-sessions -F "#{session_name}" 2>/dev/null); do
+    while IFS= read -r line; do
+        target="${line%%@@*}"; cmd=$(printf "%s" "$line" | cut -d"@@" -f4)
+        if printf "%s" "$cmd" | grep -qE "^(bash|zsh|fish|sh|dash)$"; then
+            i=$((i+1))
+        else
+            tail=$(tmux capture-pane -t "$target" -p -S -10 2>/dev/null)
+            last=$(printf "%s" "$tail" | sed "/^$/d" | tail -1)
+            if printf "%s" "$tail" | grep -qE "⏺|❯"; then
+                if printf "%s" "$last" | grep -qE "esc to interrupt|ctrl\+c to interrupt"; then
+                    r=$((r+1))
+                elif printf "%s" "$last" | grep -qE "\[[Yy]/[Nn]\]|Enter to select|Esc to cancel|ctrl-g|\(esc\)$"; then
+                    w=$((w+1))
+                elif printf "%s" "$tail" | grep -qE "❯ [0-9]+\.|Ready to submit"; then
+                    w=$((w+1))
+                else
+                    i=$((i+1))
+                fi
+            fi
+        fi
+    done <<EOF
+$(tmux list-windows -t "=$s" -F "#{session_name}:#{window_index}@@${s}@@#{window_name}@@#{pane_current_command}" 2>/dev/null)
+EOF
+done
+printf "%d %d %d\n" "$w" "$r" "$i"' >> "$tmpout" 2>/dev/null &
+        pids+=($!)
+    done <<< "$peers"
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    # Sum counts from all hosts
+    local tw=0 tr=0 ti=0
+    while read -r w r i; do
+        tw=$((tw + w)); tr=$((tr + r)); ti=$((ti + i))
+    done < "$tmpout"
+    rm -f "$tmpout"
+
+    mkdir -p "$(dirname "$REMOTE_STATUS_FILE")"
+    printf 'waiting=%d\nrunning=%d\nidle=%d\n' "$tw" "$tr" "$ti" > "$REMOTE_STATUS_FILE"
+}
+
+_status_line() {
+    local waiting=0 running=0 idle=0
+
+    # Build proxy session set
+    local _proxy_list=""
+    local _s
+    while IFS= read -r _s; do
+        if tmux show-environment -t "=$_s" CLAUDEMACS_PROXY 2>/dev/null | grep -q '='; then
+            _proxy_list="${_proxy_list}|${_s}"
+        fi
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+
+    # Load archive set
+    local _archived_list=""
+    [ -f "$ARCHIVE_FILE" ] && _archived_list=$(<"$ARCHIVE_FILE")
+
+    local _all_windows
+    _all_windows=$(tmux list-windows -a -F "#{session_name}:#{window_index}	#{session_name}	#{pane_current_command}" 2>/dev/null) || return 0
+    [ -z "$_all_windows" ] && return 0
+
+    while IFS=$'\t' read -r target sess cmd; do
+        [ -z "$target" ] && continue
+        [[ "$_proxy_list" == *"|${sess}"* ]] && continue
+        # Skip archived
+        if [ -n "$_archived_list" ] && [[ $'\n'"$_archived_list"$'\n' == *$'\n'"$target"$'\n'* ]]; then
+            continue
+        fi
+        if [[ "$cmd" =~ ^(bash|zsh|fish|sh|dash)$ ]]; then
+            ((idle++))
+            continue
+        fi
+
+        local full_capture tail lastline
+        full_capture=$(tmux capture-pane -t "$target" -p -S -50 2>/dev/null) || continue
+        tail=$(printf '%s\n' "$full_capture" | tail -20 | sed '/^$/d' | tail -10)
+        lastline=$(printf '%s\n' "$tail" | tail -1)
+
+        if [[ "$tail" =~ ⏺|❯ ]]; then
+            if [[ "$lastline" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
+                ((running++))
+            elif [[ "$lastline" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
+                ((waiting++))
+            elif [[ "$tail" =~ ❯\ [0-9]+\.|Ready\ to\ submit ]]; then
+                ((waiting++))
+            else
+                ((idle++))
+            fi
+        fi
+    done <<< "$_all_windows"
+
+    # Merge remote counts from cache, refresh in background if stale
+    if [ -f "$REMOTE_STATUS_FILE" ]; then
+        while IFS='=' read -r key val; do
+            case "$key" in
+                waiting) waiting=$((waiting + val)) ;;
+                running) running=$((running + val)) ;;
+                idle)    idle=$((idle + val)) ;;
+            esac
+        done < "$REMOTE_STATUS_FILE"
+        # Check staleness (macOS stat)
+        local mtime now age
+        mtime=$(stat -f%m "$REMOTE_STATUS_FILE" 2>/dev/null || stat -c%Y "$REMOTE_STATUS_FILE" 2>/dev/null) || mtime=0
+        now=$(date +%s)
+        age=$((now - mtime))
+        if [ "$age" -ge "$REMOTE_STATUS_TTL" ]; then
+            _status_line_fetch_remote &
+            disown 2>/dev/null
+        fi
+    elif command -v tailscale >/dev/null 2>&1; then
+        # No cache yet, kick off first fetch
+        _status_line_fetch_remote &
+        disown 2>/dev/null
+    fi
+
+    local out=""
+    [ "$waiting" -gt 0 ] && out="#[fg=yellow]◎ ${waiting}#[default] "
+    [ "$idle" -gt 0 ] && out="${out}#[fg=yellow]○ ${idle}#[default] "
+    [ "$running" -gt 0 ] && out="${out}#[fg=green]● ${running}#[default] "
+    printf '%s' "$out"
+}
+
 # --- Queries ---
 
 _sessions() {
@@ -499,8 +650,11 @@ _switch() {
         if ! tmux has-session -t "=$session" 2>/dev/null; then
             tmux new-session -d -s "$session" -n "$win_idx"
             tmux set-environment -t "=$session" CLAUDEMACS_PROXY 1
+            tmux set-option -t "$session" @claudemacs_proxy 1
             tmux send-keys -t "$proxy_target" "$ssh_cmd" Enter
         else
+            # Ensure proxy session is tagged for passthrough detection
+            tmux set-option -q -t "$session" @claudemacs_proxy 1
             # Create window in proxy if it doesn't exist
             if ! tmux list-windows -t "=$session" -F '#{window_index}' | grep -qx "$win_idx"; then
                 tmux new-window -t "=${session}" -n "$win_idx"
@@ -510,7 +664,7 @@ _switch() {
             pane_cmd=$(tmux display-message -t "$proxy_target" -p '#{pane_current_command}' 2>/dev/null)
             pane_content=$(tmux capture-pane -t "$proxy_target" -p -S -5 2>/dev/null)
             if echo "$pane_cmd" | grep -qE '^(bash|zsh|fish|sh|dash)$' || \
-               echo "$pane_content" | grep -qiE 'connection (closed|reset|timed out)|broken pipe|\$\s*$|%\s*$|>\s*$'; then
+               echo "$pane_content" | grep -qiE 'connection (closed|reset|timed out)|broken pipe'; then
                 tmux send-keys -t "$proxy_target" "$ssh_cmd" Enter
             fi
         fi
@@ -607,6 +761,29 @@ _pick_command() {
         echo "$cmd"
     fi
 }
+
+_ensure_passthrough_bindings() {
+    local self
+    self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+    # F12 toggles between normal and passthrough
+    tmux bind -T root F12 \
+        set key-table off \;\
+        set status-style "bg=colour236" \;\
+        refresh-client -S
+    tmux bind -T off F12 \
+        set -u key-table \;\
+        set -u status-style \;\
+        refresh-client -S
+    # Picker always opens locally, even in passthrough
+    tmux bind -T off C-t display-popup -E -d '#{pane_current_path}' -w 80% -h 80% "$self"
+    # Auto-passthrough: on every session change, detect proxy sessions
+    # via @claudemacs_proxy option and toggle key-table accordingly.
+    tmux set-hook -g 'client-session-changed[42]' \
+        "if-shell -F '#{@claudemacs_proxy}' \
+            'set key-table off ; set status-style bg=colour236 ; refresh-client -S' \
+            'set -u key-table ; set -u status-style ; refresh-client -S'"
+}
+
 
 _create_project() {
     local name="$1" path="$2"
@@ -891,6 +1068,7 @@ _new_task_flow() {
 
 _picker() {
     local self="$0"
+    _ensure_passthrough_bindings
     local remote_cache local_cache fzf_sock
     remote_cache=$(mktemp "${TMPDIR:-/tmp}/claudemacs-remote.XXXXXX")
     local_cache=$(mktemp "${TMPDIR:-/tmp}/claudemacs-local.XXXXXX")
@@ -964,6 +1142,7 @@ _setup() {
 Add to ~/.tmux.conf:
 
   bind C-t display-popup -E -d '#{pane_current_path}' -w 80% -h 80% "$self"
+  bind -T off C-t display-popup -E -d '#{pane_current_path}' -w 80% -h 80% "$self"
 
 Then reload:
 
@@ -1004,6 +1183,7 @@ main() {
         add-path)       shift; _add_path "$@" ;;
         paths)          _list_paths ;;
         scan)           _scan_projects ;;
+        status-line)    _require_tmux; _status_line ;;
         new)            _require_tmux; _require_fzf; shift; _new_task_flow "$*" ;;
         new-project)    _require_tmux; _require_fzf; _new_project_flow ;;
         _tasks)         _require_tmux; _tasks | sort -t$'\t' -k4 -n -s | cut -f1-3 ;;
