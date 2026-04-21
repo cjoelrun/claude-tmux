@@ -32,6 +32,26 @@ _toggle_focus() {
     fi
 }
 
+# Detect Claude session status from pane capture text.
+# Takes target as $1, outputs: "running", "waiting", "idle", or "" (not a claude session).
+_detect_status() {
+    local target="$1"
+    local full_capture tail
+    full_capture=$(tmux capture-pane -t "$target" -p -S -50 2>/dev/null) || return
+    tail=$(printf '%s\n' "$full_capture" | tail -20 | sed '/^$/d' | tail -10)
+    if [[ "$tail" =~ ⏺|❯|Enter\ to\ select|Ready\ to\ submit ]]; then
+        if [[ "$tail" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
+            echo running
+        elif [[ "$tail" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
+            echo waiting
+        elif [[ "$tail" =~ ❯\ [0-9]+\.|Ready\ to\ submit ]]; then
+            echo waiting
+        else
+            echo idle
+        fi
+    fi
+}
+
 # Sort raw task lines and insert a separator between focused and unfocused items.
 # Reads tab-delimited lines on stdin (sort_order in field 4), outputs fields 1-3.
 _sort_with_separator() {
@@ -151,22 +171,13 @@ _status_line() {
             continue
         fi
 
-        local full_capture tail lastline
-        full_capture=$(tmux capture-pane -t "$target" -p -S -50 2>/dev/null) || continue
-        tail=$(printf '%s\n' "$full_capture" | tail -20 | sed '/^$/d' | tail -10)
-        lastline=$(printf '%s\n' "$tail" | tail -1)
-
-        if [[ "$tail" =~ ⏺|❯|Enter\ to\ select|Ready\ to\ submit ]]; then
-            if [[ "$tail" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
-                ((running++))
-            elif [[ "$tail" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
-                ((waiting++))
-            elif [[ "$tail" =~ ❯\ [0-9]+\.|Ready\ to\ submit ]]; then
-                ((waiting++))
-            else
-                ((idle++))
-            fi
-        fi
+        local st
+        st=$(_detect_status "$target")
+        case "$st" in
+            running) ((running++)) ;;
+            waiting) ((waiting++)) ;;
+            idle)    ((idle++)) ;;
+        esac
     done <<< "$_all_windows"
 
     # Merge remote counts from cache, refresh in background if stale
@@ -306,31 +317,14 @@ _tasks() {
         if [[ "$cmd" =~ ^(bash|zsh|fish|sh|dash)$ ]]; then
             status="idle" icon="○" color="$YELLOW" sort_order=1
         else
-            # Single capture-pane call; derive tail from it
-            local full_capture
-            full_capture=$(tmux capture-pane -t "$target" -p -S -50 2>/dev/null)
-            # Extract last non-empty line and last 10 non-empty lines for status detection
-            local tail lastline
-            tail=""
-            lastline=""
-            tail=$(printf '%s\n' "$full_capture" | tail -20 | sed '/^$/d' | tail -10)
-            lastline=$(printf '%s\n' "$tail" | tail -1)
-            if [[ "$tail" =~ ⏺|❯|Enter\ to\ select|Ready\ to\ submit ]]; then
-                # claude code session (may have subprocesses running)
-                if [[ "$tail" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
-                    status="running" icon="●" color="$GREEN" sort_order=2
-                elif [[ "$tail" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
-                    status="waiting" icon="◎" color="$YELLOW" sort_order=0
-                elif [[ "$tail" =~ ❯\ [0-9]+\.|Ready\ to\ submit ]]; then
-                    # Claude numbered menu selection
-                    status="waiting" icon="◎" color="$YELLOW" sort_order=0
-                else
-                    status="idle" icon="○" color="$YELLOW" sort_order=1
-                fi
-            else
-                # non-claude process (node, just, etc.)
-                status="process" icon="⚙" color="$DIM" sort_order=3
-            fi
+            local st
+            st=$(_detect_status "$target")
+            case "$st" in
+                running) status="running" icon="●" color="$GREEN" sort_order=2 ;;
+                waiting) status="waiting" icon="◎" color="$YELLOW" sort_order=0 ;;
+                idle)    status="idle" icon="○" color="$YELLOW" sort_order=1 ;;
+                *)       status="process" icon="⚙" color="$DIM" sort_order=3 ;;
+            esac
         fi
         # Check focus via string match (avoids per-task grep)
         local is_focused=false
@@ -339,11 +333,7 @@ _tasks() {
             is_focused=true
         fi
         local pane_text
-        if [[ "$cmd" =~ ^(bash|zsh|fish|sh|dash)$ ]]; then
-            pane_text=$(tmux capture-pane -t "$target" -p -S -50 2>/dev/null | tr '\n' ' ' | tr '\t' ' ')
-        else
-            pane_text=$(printf '%s' "$full_capture" | tr '\n' ' ' | tr '\t' ' ')
-        fi
+        pane_text=$(tmux capture-pane -t "$target" -p -S -50 2>/dev/null | tr '\n' ' ' | tr '\t' ' ')
         local proj_col=15 name_col=20
         # Truncate long names
         [ ${#project} -gt $proj_col ] && project="${project:0:$((proj_col-1))}…"
