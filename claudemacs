@@ -156,7 +156,7 @@ _status_line() {
         tail=$(printf '%s\n' "$full_capture" | tail -20 | sed '/^$/d' | tail -10)
         lastline=$(printf '%s\n' "$tail" | tail -1)
 
-        if [[ "$tail" =~ ⏺|❯ ]]; then
+        if [[ "$tail" =~ ⏺|❯|Enter\ to\ select|Ready\ to\ submit ]]; then
             if [[ "$tail" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
                 ((running++))
             elif [[ "$tail" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
