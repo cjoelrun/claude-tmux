@@ -147,9 +147,9 @@ _status_line() {
         lastline=$(printf '%s\n' "$tail" | tail -1)
 
         if [[ "$tail" =~ ⏺|❯ ]]; then
-            if [[ "$lastline" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
+            if [[ "$tail" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
                 ((running++))
-            elif [[ "$lastline" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
+            elif [[ "$tail" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
                 ((waiting++))
             elif [[ "$tail" =~ ❯\ [0-9]+\.|Ready\ to\ submit ]]; then
                 ((waiting++))
@@ -304,11 +304,11 @@ _tasks() {
             lastline=""
             tail=$(printf '%s\n' "$full_capture" | tail -20 | sed '/^$/d' | tail -10)
             lastline=$(printf '%s\n' "$tail" | tail -1)
-            if [[ "$tail" =~ ⏺|❯ ]]; then
+            if [[ "$tail" =~ ⏺|❯|Enter\ to\ select|Ready\ to\ submit ]]; then
                 # claude code session (may have subprocesses running)
-                if [[ "$lastline" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
+                if [[ "$tail" =~ esc\ to\ interrupt|ctrl\+c\ to\ interrupt ]]; then
                     status="running" icon="●" color="$GREEN" sort_order=2
-                elif [[ "$lastline" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
+                elif [[ "$tail" =~ \[[Yy]/[Nn]\]|Enter\ to\ select.*Esc\ to\ cancel|Esc\ to\ cancel|ctrl-g\ to\ edit\ in\ VS\ Code|\(esc\)$ ]]; then
                     status="waiting" icon="◎" color="$YELLOW" sort_order=0
                 elif [[ "$tail" =~ ❯\ [0-9]+\.|Ready\ to\ submit ]]; then
                     # Claude numbered menu selection
@@ -479,9 +479,9 @@ for s in $(tmux list-sessions -F "#{session_name}" 2>/dev/null); do
             tail=$(tmux capture-pane -t "$target" -p -S -10 2>/dev/null)
             last=$(printf "%s" "$tail" | sed "/^$/d" | tail -1)
             if printf "%s" "$tail" | grep -qE "⏺|❯"; then
-                if printf "%s" "$last" | grep -qE "esc to interrupt|ctrl\+c to interrupt"; then
+                if printf "%s" "$tail" | grep -qE "esc to interrupt|ctrl\+c to interrupt"; then
                     st="running"
-                elif printf "%s" "$last" | grep -qE "\[[Yy]/[Nn]\]|Enter to select|Esc to cancel|ctrl-g|\(esc\)$"; then
+                elif printf "%s" "$tail" | grep -qE "\[[Yy]/[Nn]\]|Enter to select|Esc to cancel|ctrl-g|\(esc\)$"; then
                     st="waiting"
                 elif printf "%s" "$tail" | grep -qE "❯ [0-9]+\.|Ready to submit"; then
                     st="waiting"
@@ -516,7 +516,7 @@ done' 2>/dev/null) || return 0
         [ ${#name} -gt $name_col ] && name="${name:0:$((name_col-1))}…"
         local proj_pad=$(( proj_col - ${#project} ))
         local name_pad=$(( name_col - ${#name} ))
-        local host_tag="${DIM}[${hostname}]${RESET}"
+        local host_tag="${DIM}↗${RESET}"
         local label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
         local status_str="${icon} ${status}"
         local list_width=46
