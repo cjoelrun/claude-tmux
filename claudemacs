@@ -104,11 +104,10 @@ for s in $(tmux list-sessions -F "#{session_name}" 2>/dev/null); do
             i=$((i+1))
         else
             tail=$(tmux capture-pane -t "$target" -p -S -10 2>/dev/null)
-            last=$(printf "%s" "$tail" | sed "/^$/d" | tail -1)
-            if printf "%s" "$tail" | grep -qE "⏺|❯"; then
-                if printf "%s" "$last" | grep -qE "esc to interrupt|ctrl\+c to interrupt"; then
+            if printf "%s" "$tail" | grep -qE "⏺|❯|Enter to select|Ready to submit"; then
+                if printf "%s" "$tail" | grep -qE "esc to interrupt|ctrl\+c to interrupt"; then
                     r=$((r+1))
-                elif printf "%s" "$last" | grep -qE "\[[Yy]/[Nn]\]|Enter to select|Esc to cancel|ctrl-g|\(esc\)$"; then
+                elif printf "%s" "$tail" | grep -qE "\[[Yy]/[Nn]\]|Enter to select|Esc to cancel|ctrl-g|\(esc\)$"; then
                     w=$((w+1))
                 elif printf "%s" "$tail" | grep -qE "❯ [0-9]+\.|Ready to submit"; then
                     w=$((w+1))
@@ -484,8 +483,7 @@ for s in $(tmux list-sessions -F "#{session_name}" 2>/dev/null); do
             st="idle"
         else
             tail=$(tmux capture-pane -t "$target" -p -S -10 2>/dev/null)
-            last=$(printf "%s" "$tail" | sed "/^$/d" | tail -1)
-            if printf "%s" "$tail" | grep -qE "⏺|❯"; then
+            if printf "%s" "$tail" | grep -qE "⏺|❯|Enter to select|Ready to submit"; then
                 if printf "%s" "$tail" | grep -qE "esc to interrupt|ctrl\+c to interrupt"; then
                     st="running"
                 elif printf "%s" "$tail" | grep -qE "\[[Yy]/[Nn]\]|Enter to select|Esc to cancel|ctrl-g|\(esc\)$"; then
@@ -558,11 +556,6 @@ _fetch_remote() {
         wait "$pid" 2>/dev/null || true
     done
     mv "$tmpout" "$outfile"
-}
-
-_merged_tasks() {
-    local tmpfile="${1:-}"
-    { _tasks; [ -n "$tmpfile" ] && [ -f "$tmpfile" ] && cat "$tmpfile"; } | _sort_with_separator
 }
 
 _merge_caches() {
@@ -1203,7 +1196,6 @@ main() {
         new-project)    _require_tmux; _require_fzf; _new_project_flow ;;
         _tasks)         _require_tmux; _tasks | _sort_with_separator ;;
         _tasks_raw)     _require_tmux; _tasks ;;
-        _merged_tasks)  _require_tmux; _merged_tasks "${2:-}" ;;
         _merge_caches)  _merge_caches "${2:-}" "${3:-}" ;;
         _refresh_and_merge) _require_tmux; _refresh_and_merge "${2:-}" "${3:-}" ;;
         _focus_and_refresh) _require_tmux; _focus_and_refresh "${2:-}" "${3:-}" "${4:-}" ;;
