@@ -7,7 +7,7 @@ DIM=$'\033[2m'
 BOLD=$'\033[1m'
 RESET=$'\033[0m'
 
-ARCHIVE_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/archived"
+FOCUS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/focused"
 PROJECTS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/projects"
 REMOTE_HOSTS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/remote-hosts"
 PROJECT_PATHS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/claudemacs/project-paths"
@@ -18,25 +18,35 @@ _RENV='export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/home/linuxbrew/.linu
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-_is_archived() {
-    [ -f "$ARCHIVE_FILE" ] && grep -qxF "$1" "$ARCHIVE_FILE"
+_is_focused() {
+    [ -f "$FOCUS_FILE" ] && grep -qxF "$1" "$FOCUS_FILE"
 }
 
-_toggle_archive() {
+_toggle_focus() {
     local target="$1"
-    mkdir -p "$(dirname "$ARCHIVE_FILE")"
-    if _is_archived "$target"; then
-        grep -vxF "$target" "$ARCHIVE_FILE" > "$ARCHIVE_FILE.tmp" && mv "$ARCHIVE_FILE.tmp" "$ARCHIVE_FILE"
+    mkdir -p "$(dirname "$FOCUS_FILE")"
+    if _is_focused "$target"; then
+        grep -vxF "$target" "$FOCUS_FILE" > "$FOCUS_FILE.tmp" && mv "$FOCUS_FILE.tmp" "$FOCUS_FILE"
     else
-        echo "$target" >> "$ARCHIVE_FILE"
+        echo "$target" >> "$FOCUS_FILE"
     fi
 }
 
-_unarchive() {
-    local target="$1"
-    [ -f "$ARCHIVE_FILE" ] || return 0
-    { grep -vxF "$target" "$ARCHIVE_FILE" || true; } > "$ARCHIVE_FILE.tmp"
-    mv "$ARCHIVE_FILE.tmp" "$ARCHIVE_FILE"
+# Sort raw task lines and insert a separator between focused and unfocused items.
+# Reads tab-delimited lines on stdin (sort_order in field 4), outputs fields 1-3.
+_sort_with_separator() {
+    sort -t$'\t' -k3 -n -s | {
+        local saw_focused=false sep_done=false
+        while IFS=$'\t' read -r f1 f2 f3 rest; do
+            if [ "${f3:-0}" -lt 0 ]; then
+                saw_focused=true
+            elif $saw_focused && ! $sep_done; then
+                sep_done=true
+                printf '%s\t%s\n' "separator:" "${DIM}──────────────────────────────────────────────${RESET}"
+            fi
+            printf '%s\t%s\n' "$f1" "$f2"
+        done
+    }
 }
 
 # --- Status line ---
@@ -121,10 +131,6 @@ _status_line() {
         fi
     done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
 
-    # Load archive set
-    local _archived_list=""
-    [ -f "$ARCHIVE_FILE" ] && _archived_list=$(<"$ARCHIVE_FILE")
-
     local _all_windows
     _all_windows=$(tmux list-windows -a -F "#{session_name}:#{window_index}	#{session_name}	#{pane_current_command}" 2>/dev/null) || return 0
     [ -z "$_all_windows" ] && return 0
@@ -132,10 +138,6 @@ _status_line() {
     while IFS=$'\t' read -r target sess cmd; do
         [ -z "$target" ] && continue
         [[ "$_proxy_list" == *"|${sess}"* ]] && continue
-        # Skip archived
-        if [ -n "$_archived_list" ] && [[ $'\n'"$_archived_list"$'\n' == *$'\n'"$target"$'\n'* ]]; then
-            continue
-        fi
         if [[ "$cmd" =~ ^(bash|zsh|fish|sh|dash)$ ]]; then
             ((idle++))
             continue
@@ -274,10 +276,10 @@ _tasks() {
     _all_windows=$(tmux list-windows -a -F "#{session_name}:#{window_index}	#{session_name}	#{window_name}	#{pane_current_command}	#{window_activity}" 2>/dev/null) || return 0
     [ -z "$_all_windows" ] && return 0
 
-    # Load archive set once into a newline-separated string for matching
-    local _archived_list=""
-    if [ -f "$ARCHIVE_FILE" ]; then
-        _archived_list=$(<"$ARCHIVE_FILE")
+    # Load focus set once into a newline-separated string for matching
+    local _focused_list=""
+    if [ -f "$FOCUS_FILE" ]; then
+        _focused_list=$(<"$FOCUS_FILE")
     fi
 
     # Exclude proxy sessions
@@ -321,9 +323,11 @@ _tasks() {
                 status="process" icon="⚙" color="$DIM" sort_order=3
             fi
         fi
-        # Check archive via string match (avoids per-task grep)
-        if [ -n "$_archived_list" ] && [[ $'\n'"$_archived_list"$'\n' == *$'\n'"$target"$'\n'* ]]; then
-            status="archived" icon="▪" color="$DIM" sort_order=4
+        # Check focus via string match (avoids per-task grep)
+        local is_focused=false
+        if [ -n "$_focused_list" ] && [[ $'\n'"$_focused_list"$'\n' == *$'\n'"$target"$'\n'* ]]; then
+            sort_order=$(( sort_order - 10 ))
+            is_focused=true
         fi
         local pane_text
         if [[ "$cmd" =~ ^(bash|zsh|fish|sh|dash)$ ]]; then
@@ -339,13 +343,17 @@ _tasks() {
         local name_pad=$(( name_col - ${#name} ))
         local label status_str pad
         label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
-        status_str="${icon} ${status}"
+        if $is_focused; then
+            status_str="${icon} ${status} ★"
+        else
+            status_str="${icon} ${status}"
+        fi
         local list_width=46
         local pad_len=$(( list_width - ${#label} - ${#status_str} ))
         [ "$pad_len" -lt 1 ] && pad_len=1
         pad=$(printf '%*s' "$pad_len" '')
         printf '%s\t%s%s%s%s%s%s%s\t%s\t%s\n' \
-            "$target" "$DIM" "$label" "$RESET" "$pad" "$color" "$status_str" "$RESET" "$pane_text" "$sort_order"
+            "$target" "$DIM" "$label" "$RESET" "$pad" "$color" "$status_str" "$RESET" "$sort_order" "$pane_text"
     done < <(printf '%s' "$_filtered" | sort -t$'\t' -k5 -rn)
 }
 
@@ -506,8 +514,10 @@ done' 2>/dev/null) || return 0
             idle)    icon="○" color="$YELLOW" sort_order=1 ;;
             *)       status="process" icon="⚙" color="$DIM" sort_order=3 ;;
         esac
-        if _is_archived "remote:${ip}:${target}"; then
-            status="archived" icon="▪" color="$DIM" sort_order=4
+        local is_focused=false
+        if _is_focused "remote:${ip}:${target}"; then
+            sort_order=$(( sort_order - 10 ))
+            is_focused=true
         fi
         local remote_target="remote:${ip}:${target}"
         local proj_col=15 name_col=20
@@ -518,13 +528,17 @@ done' 2>/dev/null) || return 0
         local name_pad=$(( name_col - ${#name} ))
         local host_tag="${DIM}↗${RESET}"
         local label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
-        local status_str="${icon} ${status}"
+        if $is_focused; then
+            local status_str="${icon} ${status} ★"
+        else
+            local status_str="${icon} ${status}"
+        fi
         local list_width=46
         local pad_len=$(( list_width - ${#label} - ${#status_str} ))
         [ "$pad_len" -lt 1 ] && pad_len=1
         local pad
         pad=$(printf '%*s' "$pad_len" '')
-        printf '%s\t%s%s%s%s%s%s%s %s\t\t%s\n' \
+        printf '%s\t%s%s%s%s%s%s%s %s\t%s\n' \
             "$remote_target" "$DIM" "$label" "$RESET" "$pad" "$color" "$status_str" "$RESET" "$host_tag" "$sort_order"
     done
 }
@@ -549,43 +563,45 @@ _fetch_remote() {
 
 _merged_tasks() {
     local tmpfile="${1:-}"
-    { _tasks; [ -n "$tmpfile" ] && [ -f "$tmpfile" ] && cat "$tmpfile"; } | sort -t$'\t' -k4 -n -s | cut -f1-3
+    { _tasks; [ -n "$tmpfile" ] && [ -f "$tmpfile" ] && cat "$tmpfile"; } | _sort_with_separator
 }
 
 _merge_caches() {
     local local_cache="$1" remote_cache="$2"
-    { cat "$local_cache" 2>/dev/null; cat "$remote_cache" 2>/dev/null; } | sort -t$'\t' -k4 -n -s | cut -f1-3
+    { cat "$local_cache" 2>/dev/null; cat "$remote_cache" 2>/dev/null; } | _sort_with_separator
 }
 
 _refresh_and_merge() {
     local local_cache="$1" remote_cache="$2"
     _tasks > "$local_cache"
-    { cat "$local_cache"; [ -f "$remote_cache" ] && cat "$remote_cache"; } | sort -t$'\t' -k4 -n -s | cut -f1-3
+    { cat "$local_cache"; [ -f "$remote_cache" ] && cat "$remote_cache"; } | _sort_with_separator
     return 0
 }
 
-_archive_and_refresh() {
+_focus_and_refresh() {
     local target="$1" local_cache="$2" remote_cache="$3"
-    _toggle_archive "$target"
+    _toggle_focus "$target"
     _tasks > "$local_cache"
-    # Update remote cache if target is remote (toggle archived status/sort_order)
+    # Update remote cache if target is remote (toggle focus sort_order)
     if [[ "$target" == remote:* ]] && [ -f "$remote_cache" ]; then
         local tmpfile="${remote_cache}.tmp"
         while IFS= read -r line; do
             if [[ "$line" == "${target}"$'\t'* ]]; then
-                if _is_archived "$target"; then
-                    # Replace status icon/text and sort_order with archived
-                    line=$(echo "$line" | sed -E 's/[○●◎⚙] (idle|running|waiting|process)/▪ archived/; s/	[0-4]$/	4/')
+                if _is_focused "$target"; then
+                    # Subtract 10 from current sort_order to move to focused range
+                    local cur_so; cur_so=$(echo "$line" | sed -E 's/.*	([0-9-]+)$/\1/')
+                    line=$(echo "$line" | sed -E "s/	[0-9-]+$/	$(( cur_so - 10 ))/")
                 else
-                    # Replace archived back to idle
-                    line=$(echo "$line" | sed -E 's/▪ archived/○ idle/; s/	4$/	1/')
+                    # Add 10 to restore original sort_order
+                    local cur_so; cur_so=$(echo "$line" | sed -E 's/.*	([0-9-]+)$/\1/')
+                    line=$(echo "$line" | sed -E "s/	[0-9-]+$/	$(( cur_so + 10 ))/")
                 fi
             fi
             printf '%s\n' "$line"
         done < "$remote_cache" > "$tmpfile"
         mv "$tmpfile" "$remote_cache"
     fi
-    { cat "$local_cache"; [ -f "$remote_cache" ] && cat "$remote_cache"; } | sort -t$'\t' -k4 -n -s | cut -f1-3
+    { cat "$local_cache"; [ -f "$remote_cache" ] && cat "$remote_cache"; } | _sort_with_separator
 }
 
 _kill_and_refresh() {
@@ -609,12 +625,13 @@ _kill_and_refresh() {
         i=$((i + 1))
     done
     _tasks > "$local_cache"
-    { cat "$local_cache"; [ -f "$remote_cache" ] && cat "$remote_cache"; } | sort -t$'\t' -k4 -n -s | cut -f1-3
+    { cat "$local_cache"; [ -f "$remote_cache" ] && cat "$remote_cache"; } | _sort_with_separator
 }
 
 _preview() {
     local target="${1:-}"
     [ -z "$target" ] && return
+    [[ "$target" == separator:* ]] && return
     if [[ "$target" == remote:* ]]; then
         local rest="${target#remote:}"
         local ip="${rest%%:*}"
@@ -631,8 +648,7 @@ _preview() {
 _switch() {
     local target="${1:-}" display_name="${2:-}"
     [ -z "$target" ] && return
-    [[ "$target" == loading:* ]] && return
-    _unarchive "$target"
+    [[ "$target" == loading:* || "$target" == separator:* ]] && return
     if [[ "$target" == remote:* ]]; then
         local rest="${target#remote:}"
         local ip="${rest%%:*}"
@@ -1113,19 +1129,19 @@ _picker() {
     done ) &
     local refresh_pid=$!
 
-    sort -t$'\t' -k4 -n -s < "$local_cache" | cut -f1-3 | fzf --ansi \
+    _sort_with_separator < "$local_cache" | fzf --ansi \
         --listen "$fzf_sock" \
         --layout=reverse \
         --delimiter '\t' \
         --with-nth '2' \
-        --footer 'alt-n:new task │ alt-o:new project │ alt-r:rename │ alt-a:archive │ ctrl-d:kill │ ctrl-g:refresh' \
+        --footer 'alt-n:new task │ alt-o:new project │ alt-r:rename │ alt-f:focus │ ctrl-d:kill │ ctrl-g:refresh' \
         --preview "$self _preview {1}" \
         --preview-window 'right:60%:wrap:follow,<60(down:50%:wrap:follow)' \
         --bind "enter:become($self _switch {1})" \
         --bind "alt-n:execute($self new {q} < /dev/tty > /dev/tty)+abort" \
         --bind "alt-o:execute($self new-project < /dev/tty > /dev/tty)+abort" \
         --bind "alt-r:execute($self _rename_task {1} < /dev/tty > /dev/tty)+reload($self _refresh_and_merge '$local_cache' '$remote_cache')" \
-        --bind "alt-a:reload($self _archive_and_refresh {1} '$local_cache' '$remote_cache')" \
+        --bind "alt-f:reload($self _focus_and_refresh {1} '$local_cache' '$remote_cache')" \
         --bind "ctrl-d:reload($self _kill_and_refresh {1} '$local_cache' '$remote_cache')" \
         --bind "ctrl-g:reload($self _refresh_and_merge '$local_cache' '$remote_cache')"
     local fzf_exit=$?
@@ -1186,18 +1202,18 @@ main() {
         status-line)    _require_tmux; _status_line ;;
         new)            _require_tmux; _require_fzf; shift; _new_task_flow "$*" ;;
         new-project)    _require_tmux; _require_fzf; _new_project_flow ;;
-        _tasks)         _require_tmux; _tasks | sort -t$'\t' -k4 -n -s | cut -f1-3 ;;
+        _tasks)         _require_tmux; _tasks | _sort_with_separator ;;
         _tasks_raw)     _require_tmux; _tasks ;;
         _merged_tasks)  _require_tmux; _merged_tasks "${2:-}" ;;
         _merge_caches)  _merge_caches "${2:-}" "${3:-}" ;;
         _refresh_and_merge) _require_tmux; _refresh_and_merge "${2:-}" "${3:-}" ;;
-        _archive_and_refresh) _require_tmux; _archive_and_refresh "${2:-}" "${3:-}" "${4:-}" ;;
+        _focus_and_refresh) _require_tmux; _focus_and_refresh "${2:-}" "${3:-}" "${4:-}" ;;
         _kill_and_refresh) _require_tmux; _kill_and_refresh "${2:-}" "${3:-}" "${4:-}" ;;
         _rename_task)   _require_tmux; _rename_task "${2:-}" ;;
         _preview)       _require_tmux; _preview "${2:-}" ;;
         _switch)        _require_tmux; _switch "${2:-}" ;;
         _kill)          _require_tmux; _kill_task "${2:-}" ;;
-        _toggle_archive) _toggle_archive "${2:-}" ;;
+        _toggle_focus) _toggle_focus "${2:-}" ;;
         "")             _require_tmux; _require_fzf; _picker ;;
         *)              die "unknown: $1 (try --help)" ;;
     esac
