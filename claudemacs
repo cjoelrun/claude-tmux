@@ -170,7 +170,8 @@ _status_line() {
     done <<< "$_all_windows"
 
     # Merge remote counts from cache, refresh in background if stale
-    if [ -f "$REMOTE_STATUS_FILE" ]; then
+    # Skip remote counts when focus is active (remote tasks aren't focus-filtered)
+    if [ -z "$_focused_list" ] && [ -f "$REMOTE_STATUS_FILE" ]; then
         while IFS='=' read -r key val; do
             case "$key" in
                 waiting) waiting=$((waiting + val)) ;;
@@ -187,7 +188,7 @@ _status_line() {
             _status_line_fetch_remote &
             disown 2>/dev/null
         fi
-    elif command -v tailscale >/dev/null 2>&1; then
+    elif [ -z "$_focused_list" ] && command -v tailscale >/dev/null 2>&1; then
         # No cache yet, kick off first fetch
         _status_line_fetch_remote &
         disown 2>/dev/null
