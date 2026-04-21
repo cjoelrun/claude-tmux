@@ -131,6 +131,10 @@ _status_line() {
         fi
     done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
 
+    # Load focus set — only show focused tasks in status line
+    local _focused_list=""
+    [ -f "$FOCUS_FILE" ] && _focused_list=$(<"$FOCUS_FILE")
+
     local _all_windows
     _all_windows=$(tmux list-windows -a -F "#{session_name}:#{window_index}	#{session_name}	#{pane_current_command}" 2>/dev/null) || return 0
     [ -z "$_all_windows" ] && return 0
@@ -138,6 +142,10 @@ _status_line() {
     while IFS=$'\t' read -r target sess cmd; do
         [ -z "$target" ] && continue
         [[ "$_proxy_list" == *"|${sess}"* ]] && continue
+        # Skip non-focused tasks when focus list is non-empty
+        if [ -n "$_focused_list" ] && [[ $'\n'"$_focused_list"$'\n' != *$'\n'"$target"$'\n'* ]]; then
+            continue
+        fi
         if [[ "$cmd" =~ ^(bash|zsh|fish|sh|dash)$ ]]; then
             ((idle++))
             continue
