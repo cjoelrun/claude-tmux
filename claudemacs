@@ -352,10 +352,12 @@ _tasks() {
         local name_pad=$(( _name_col - ${#name} ))
         local label status_str pad
         label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
+        local _status_label=""
+        [ "$_cols" -ge 60 ] && _status_label=" ${status}"
         if $is_focused; then
-            status_str="${icon} ${status} ★"
+            status_str="${icon}${_status_label} ★"
         else
-            status_str="${icon} ${status}"
+            status_str="${icon}${_status_label}"
         fi
         local pad_len=$(( _list_width - ${#label} - ${#status_str} ))
         [ "$pad_len" -lt 1 ] && pad_len=1
@@ -525,10 +527,12 @@ done' 2>/dev/null) || return 0
         local name_pad=$(( _nc - ${#name} ))
         local host_tag="${DIM}↗${RESET}"
         local label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
+        local _sl=""
+        [ "$_cols" -ge 60 ] && _sl=" ${status}"
         if $is_focused; then
-            local status_str="${icon} ${status} ★"
+            local status_str="${icon}${_sl} ★"
         else
-            local status_str="${icon} ${status}"
+            local status_str="${icon}${_sl}"
         fi
         local pad_len=$(( _lw - ${#label} - ${#status_str} ))
         [ "$pad_len" -lt 1 ] && pad_len=1
