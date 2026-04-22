@@ -1125,7 +1125,7 @@ _picker() {
         --bind "alt-n:execute($self new {q} < /dev/tty > /dev/tty)+abort" \
         --bind "alt-o:execute($self new-project < /dev/tty > /dev/tty)+abort" \
         --bind "alt-r:execute($self _rename_task {1} < /dev/tty > /dev/tty)+reload($self _refresh_and_merge '$local_cache' '$remote_cache')" \
-        --bind "alt-f:reload($self _focus_and_refresh {1} '$local_cache' '$remote_cache')" \
+        --bind "alt-f:reload($self _focus_and_refresh {1} '$local_cache' '$remote_cache')+clear-query" \
         --bind "ctrl-d:reload($self _kill_and_refresh {1} '$local_cache' '$remote_cache')" \
         --bind "ctrl-g:reload($self _refresh_and_merge '$local_cache' '$remote_cache')"
     local fzf_exit=$?
