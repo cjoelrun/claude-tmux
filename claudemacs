@@ -309,7 +309,7 @@ _tasks() {
     local _cols
     _cols=$(tput cols 2>/dev/null || echo 80)
     local _proj_col=15 _name_col=20 _list_width=46
-    if [ "$_cols" -lt 60 ]; then
+    if [ "$_cols" -lt 80 ]; then
         _proj_col=10 _name_col=12 _list_width=30
     fi
 
@@ -349,7 +349,7 @@ _tasks() {
         [ ${#project} -gt $_proj_col ] && project="${project:0:$((_proj_col-1))}…"
         [ ${#name} -gt $_name_col ] && name="${name:0:$((_name_col-1))}…"
         local label status_str pad
-        if [ "$_cols" -lt 60 ]; then
+        if [ "$_cols" -lt 80 ]; then
             # Narrow: icon first, compact label
             local _star=""; $is_focused && _star=" ★"
             status_str="${icon}${_star}"
@@ -529,12 +529,12 @@ done' 2>/dev/null) || return 0
         local remote_target="remote:${ip}:${target}"
         local _cols _pc=15 _nc=20 _lw=46
         _cols=$(tput cols 2>/dev/null || echo 80)
-        if [ "$_cols" -lt 60 ]; then _pc=10 _nc=12 _lw=30; fi
+        if [ "$_cols" -lt 80 ]; then _pc=10 _nc=12 _lw=30; fi
         # Truncate long names
         [ ${#project} -gt $_pc ] && project="${project:0:$((_pc-1))}…"
         [ ${#name} -gt $_nc ] && name="${name:0:$((_nc-1))}…"
         local host_tag="${DIM}↗${RESET}"
-        if [ "$_cols" -lt 60 ]; then
+        if [ "$_cols" -lt 80 ]; then
             local _star=""; $is_focused && _star=" ★"
             local status_str="${icon}${_star}"
             local label="${project}/${name}"
