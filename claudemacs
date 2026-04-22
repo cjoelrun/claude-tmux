@@ -348,22 +348,32 @@ _tasks() {
         # Truncate long names
         [ ${#project} -gt $_proj_col ] && project="${project:0:$((_proj_col-1))}…"
         [ ${#name} -gt $_name_col ] && name="${name:0:$((_name_col-1))}…"
-        local proj_pad=$(( _proj_col - ${#project} ))
-        local name_pad=$(( _name_col - ${#name} ))
         local label status_str pad
-        label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
-        local _status_label=""
-        [ "$_cols" -ge 60 ] && _status_label=" ${status}"
-        if $is_focused; then
-            status_str="${icon}${_status_label} ★"
+        if [ "$_cols" -lt 60 ]; then
+            # Narrow: icon first, compact label
+            local _star=""; $is_focused && _star=" ★"
+            status_str="${icon}${_star}"
+            label="${project}/${name}"
+            local pad_len=$(( _list_width - ${#label} - ${#status_str} - 1 ))
+            [ "$pad_len" -lt 1 ] && pad_len=1
+            pad=$(printf '%*s' "$pad_len" '')
+            printf '%s\t%s%s%s %s%s%s%s\t%s\t%s\n' \
+                "$target" "$color" "$status_str" "$RESET" "$DIM" "$label" "$RESET" "$pad" "$sort_order" "$pane_text"
         else
-            status_str="${icon}${_status_label}"
+            local proj_pad=$(( _proj_col - ${#project} ))
+            local name_pad=$(( _name_col - ${#name} ))
+            label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
+            if $is_focused; then
+                status_str="${icon} ${status} ★"
+            else
+                status_str="${icon} ${status}"
+            fi
+            local pad_len=$(( _list_width - ${#label} - ${#status_str} ))
+            [ "$pad_len" -lt 1 ] && pad_len=1
+            pad=$(printf '%*s' "$pad_len" '')
+            printf '%s\t%s%s%s%s%s%s%s\t%s\t%s\n' \
+                "$target" "$DIM" "$label" "$RESET" "$pad" "$color" "$status_str" "$RESET" "$sort_order" "$pane_text"
         fi
-        local pad_len=$(( _list_width - ${#label} - ${#status_str} ))
-        [ "$pad_len" -lt 1 ] && pad_len=1
-        pad=$(printf '%*s' "$pad_len" '')
-        printf '%s\t%s%s%s%s%s%s%s\t%s\t%s\n' \
-            "$target" "$DIM" "$label" "$RESET" "$pad" "$color" "$status_str" "$RESET" "$sort_order" "$pane_text"
     done < <(printf '%s' "$_filtered" | sort -t$'\t' -k5 -rn)
 }
 
@@ -523,23 +533,33 @@ done' 2>/dev/null) || return 0
         # Truncate long names
         [ ${#project} -gt $_pc ] && project="${project:0:$((_pc-1))}…"
         [ ${#name} -gt $_nc ] && name="${name:0:$((_nc-1))}…"
-        local proj_pad=$(( _pc - ${#project} ))
-        local name_pad=$(( _nc - ${#name} ))
         local host_tag="${DIM}↗${RESET}"
-        local label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
-        local _sl=""
-        [ "$_cols" -ge 60 ] && _sl=" ${status}"
-        if $is_focused; then
-            local status_str="${icon}${_sl} ★"
+        if [ "$_cols" -lt 60 ]; then
+            local _star=""; $is_focused && _star=" ★"
+            local status_str="${icon}${_star}"
+            local label="${project}/${name}"
+            local pad_len=$(( _lw - ${#label} - ${#status_str} - 1 ))
+            [ "$pad_len" -lt 1 ] && pad_len=1
+            local pad
+            pad=$(printf '%*s' "$pad_len" '')
+            printf '%s\t%s%s%s %s%s%s%s %s\t%s\n' \
+                "$remote_target" "$color" "$status_str" "$RESET" "$DIM" "$label" "$RESET" "$pad" "$host_tag" "$sort_order"
         else
-            local status_str="${icon}${_sl}"
+            local proj_pad=$(( _pc - ${#project} ))
+            local name_pad=$(( _nc - ${#name} ))
+            local label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
+            if $is_focused; then
+                local status_str="${icon} ${status} ★"
+            else
+                local status_str="${icon} ${status}"
+            fi
+            local pad_len=$(( _lw - ${#label} - ${#status_str} ))
+            [ "$pad_len" -lt 1 ] && pad_len=1
+            local pad
+            pad=$(printf '%*s' "$pad_len" '')
+            printf '%s\t%s%s%s%s%s%s%s %s\t%s\n' \
+                "$remote_target" "$DIM" "$label" "$RESET" "$pad" "$color" "$status_str" "$RESET" "$host_tag" "$sort_order"
         fi
-        local pad_len=$(( _lw - ${#label} - ${#status_str} ))
-        [ "$pad_len" -lt 1 ] && pad_len=1
-        local pad
-        pad=$(printf '%*s' "$pad_len" '')
-        printf '%s\t%s%s%s%s%s%s%s %s\t%s\n' \
-            "$remote_target" "$DIM" "$label" "$RESET" "$pad" "$color" "$status_str" "$RESET" "$host_tag" "$sort_order"
     done
 }
 
