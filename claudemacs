@@ -73,7 +73,7 @@ _sort_with_separator() {
                 saw_focused=true
             elif $saw_focused && ! $sep_done; then
                 sep_done=true
-                printf '%s\t%s\n' "separator:" "${DIM}──────────────────────────────────────────────${RESET}"
+                printf '%s\t%s\n' "separator:" "${DIM}─────────────────────────────${RESET}"
             fi
             printf '%s\t%s\n' "$f1" "$f2"
         done
@@ -305,6 +305,14 @@ _tasks() {
         _focused_list=$(<"$FOCUS_FILE")
     fi
 
+    # Responsive column widths
+    local _cols
+    _cols=$(tput cols 2>/dev/null || echo 80)
+    local _proj_col=15 _name_col=20 _list_width=46
+    if [ "$_cols" -lt 60 ]; then
+        _proj_col=10 _name_col=12 _list_width=30
+    fi
+
     # Exclude proxy sessions
     local _filtered=""
     while IFS=$'\t' read -r _target _sess _wname _cmd _activity; do
@@ -337,12 +345,11 @@ _tasks() {
         fi
         local pane_text
         pane_text=$(tmux capture-pane -t "$target" -p -S -50 2>/dev/null | tr '\n' ' ' | tr '\t' ' ')
-        local proj_col=15 name_col=20
         # Truncate long names
-        [ ${#project} -gt $proj_col ] && project="${project:0:$((proj_col-1))}…"
-        [ ${#name} -gt $name_col ] && name="${name:0:$((name_col-1))}…"
-        local proj_pad=$(( proj_col - ${#project} ))
-        local name_pad=$(( name_col - ${#name} ))
+        [ ${#project} -gt $_proj_col ] && project="${project:0:$((_proj_col-1))}…"
+        [ ${#name} -gt $_name_col ] && name="${name:0:$((_name_col-1))}…"
+        local proj_pad=$(( _proj_col - ${#project} ))
+        local name_pad=$(( _name_col - ${#name} ))
         local label status_str pad
         label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
         if $is_focused; then
@@ -350,8 +357,7 @@ _tasks() {
         else
             status_str="${icon} ${status}"
         fi
-        local list_width=46
-        local pad_len=$(( list_width - ${#label} - ${#status_str} ))
+        local pad_len=$(( _list_width - ${#label} - ${#status_str} ))
         [ "$pad_len" -lt 1 ] && pad_len=1
         pad=$(printf '%*s' "$pad_len" '')
         printf '%s\t%s%s%s%s%s%s%s\t%s\t%s\n' \
@@ -509,12 +515,14 @@ done' 2>/dev/null) || return 0
             is_focused=true
         fi
         local remote_target="remote:${ip}:${target}"
-        local proj_col=15 name_col=20
+        local _cols _pc=15 _nc=20 _lw=46
+        _cols=$(tput cols 2>/dev/null || echo 80)
+        if [ "$_cols" -lt 60 ]; then _pc=10 _nc=12 _lw=30; fi
         # Truncate long names
-        [ ${#project} -gt $proj_col ] && project="${project:0:$((proj_col-1))}…"
-        [ ${#name} -gt $name_col ] && name="${name:0:$((name_col-1))}…"
-        local proj_pad=$(( proj_col - ${#project} ))
-        local name_pad=$(( name_col - ${#name} ))
+        [ ${#project} -gt $_pc ] && project="${project:0:$((_pc-1))}…"
+        [ ${#name} -gt $_nc ] && name="${name:0:$((_nc-1))}…"
+        local proj_pad=$(( _pc - ${#project} ))
+        local name_pad=$(( _nc - ${#name} ))
         local host_tag="${DIM}↗${RESET}"
         local label="${project}$(printf '%*s' "$proj_pad" '')${name}$(printf '%*s' "$name_pad" '')"
         if $is_focused; then
@@ -522,8 +530,7 @@ done' 2>/dev/null) || return 0
         else
             local status_str="${icon} ${status}"
         fi
-        local list_width=46
-        local pad_len=$(( list_width - ${#label} - ${#status_str} ))
+        local pad_len=$(( _lw - ${#label} - ${#status_str} ))
         [ "$pad_len" -lt 1 ] && pad_len=1
         local pad
         pad=$(printf '%*s' "$pad_len" '')
@@ -1118,16 +1125,17 @@ _picker() {
         --layout=reverse \
         --delimiter '\t' \
         --with-nth '2' \
-        --footer 'alt-n:new task │ alt-o:new project │ alt-r:rename │ alt-f:focus │ ctrl-d:kill │ ctrl-g:refresh' \
+        --footer '? for keys' \
         --preview "$self _preview {1}" \
-        --preview-window 'right:60%:wrap:follow,<60(down:50%:wrap:follow)' \
+        --preview-window 'right:60%:wrap:follow,<80(down:40%:wrap:follow),<50(hidden)' \
         --bind "enter:become($self _switch {1})" \
         --bind "alt-n:execute($self new {q} < /dev/tty > /dev/tty)+abort" \
         --bind "alt-o:execute($self new-project < /dev/tty > /dev/tty)+abort" \
         --bind "alt-r:execute($self _rename_task {1} < /dev/tty > /dev/tty)+reload($self _refresh_and_merge '$local_cache' '$remote_cache')" \
         --bind "alt-f:reload($self _focus_and_refresh {1} '$local_cache' '$remote_cache')+clear-query" \
         --bind "ctrl-d:reload($self _kill_and_refresh {1} '$local_cache' '$remote_cache')" \
-        --bind "ctrl-g:reload($self _refresh_and_merge '$local_cache' '$remote_cache')"
+        --bind "ctrl-g:reload($self _refresh_and_merge '$local_cache' '$remote_cache')" \
+        --bind "?:change-footer(alt-n:new │ alt-o:project │ alt-r:rename │ alt-f:focus │ ctrl-d:kill │ ctrl-g:refresh)"
     local fzf_exit=$?
 
     kill "$fetch_pid" "$refresh_pid" 2>/dev/null
